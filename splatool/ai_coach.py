@@ -1,18 +1,15 @@
-"""Claude APIを使ったプレー分析・コーチング機能。
+"""AIコーチング機能(プロンプト定義とプロバイダ呼び出し)。
 
-ANTHROPIC_API_KEY が設定されていれば動画フレームのAI分析とチャット相談が使える。
-未設定の場合、呼び出し側は knowledge.get_rule_based_advice() にフォールバックする。
+実際のAIバックエンドは providers.py の実装(Claude / Gemini / Ollama)を
+差し替えて使う。どのバックエンドでも同じプロンプト・同じ出力形式で動く。
 """
 
 from __future__ import annotations
 
 import os
 
-import anthropic
-
+from .providers import Message
 from .video_analyzer import Frame
-
-MODEL = "claude-opus-4-8"
 
 COACH_SYSTEM_PROMPT = """\
 あなたはスプラトゥーン3の上級コーチです。プレイヤーの上達を支援します。
@@ -50,57 +47,32 @@ VIDEO_ANALYSIS_PROMPT = """\
 
 
 def has_api_key() -> bool:
+    """後方互換用: Claude APIキーの有無"""
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
-def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic()
-
-
-def analyze_video_frames(frames: list[Frame], context: str = "特になし") -> str:
-    """抽出フレームをClaudeに送り、コーチングレポートを生成する。"""
-    content: list[dict] = []
+def analyze_video_frames(provider, frames: list[Frame], context: str = "特になし") -> str:
+    """抽出フレームをAIに送り、コーチングレポートを生成する。"""
+    parts: list[tuple[str, str]] = []
     for f in frames:
-        content.append({"type": "text", "text": f"[タイムスタンプ {f.label}]"})
-        content.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": f.b64,
-                },
-            }
-        )
-    content.append({"type": "text", "text": VIDEO_ANALYSIS_PROMPT.format(context=context)})
+        parts.append(("text", f"[タイムスタンプ {f.label}]"))
+        parts.append(("image", f.b64))
+    parts.append(("text", VIDEO_ANALYSIS_PROMPT.format(context=context)))
 
-    with _client().messages.stream(
-        model=MODEL,
+    return provider.generate(
+        system=COACH_SYSTEM_PROMPT,
+        messages=[Message(role="user", parts=parts)],
         max_tokens=16000,
-        thinking={"type": "adaptive"},
-        system=COACH_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": content}],
-    ) as stream:
-        response = stream.get_final_message()
-
-    return "".join(b.text for b in response.content if b.type == "text")
+    )
 
 
-def chat(history: list[dict[str, str]]) -> str:
+def chat(provider, history: list[dict[str, str]]) -> str:
     """コーチとのチャット。history は [{"role": "user"|"assistant", "content": str}, ...]"""
-    with _client().messages.stream(
-        model=MODEL,
-        max_tokens=8000,
-        thinking={"type": "adaptive"},
-        system=COACH_SYSTEM_PROMPT,
-        messages=history,
-    ) as stream:
-        response = stream.get_final_message()
-
-    return "".join(b.text for b in response.content if b.type == "text")
+    messages = [Message.text(m["role"], m["content"]) for m in history]
+    return provider.generate(system=COACH_SYSTEM_PROMPT, messages=messages, max_tokens=8000)
 
 
-def analyze_match_stats(stats_summary: str) -> str:
+def analyze_match_stats(provider, stats_summary: str) -> str:
     """試合記録の集計結果をもとに傾向分析とアドバイスを生成する。"""
     prompt = f"""\
 以下は私のスプラトゥーン3の戦績データの集計です。
@@ -110,13 +82,8 @@ def analyze_match_stats(stats_summary: str) -> str:
 このデータから読み取れる傾向(得意/苦手なルール・ステージ・ブキ、デス数の傾向など)を分析し、
 勝率を上げるための具体的なアドバイスを優先度順に3つ提案してください。
 """
-    with _client().messages.stream(
-        model=MODEL,
-        max_tokens=8000,
-        thinking={"type": "adaptive"},
+    return provider.generate(
         system=COACH_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    ) as stream:
-        response = stream.get_final_message()
-
-    return "".join(b.text for b in response.content if b.type == "text")
+        messages=[Message.text("user", prompt)],
+        max_tokens=8000,
+    )
