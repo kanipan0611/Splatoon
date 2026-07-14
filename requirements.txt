@@ -1,0 +1,5 @@
+streamlit>=1.35
+anthropic>=0.116
+opencv-python-headless>=4.9
+pandas>=2.0
+numpy>=1.26
